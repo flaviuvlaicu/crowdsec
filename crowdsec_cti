@@ -1,0 +1,129 @@
+#!/bin/sh
+
+# PROVIDE: crowdsec_cti
+# REQUIRE: LOGIN
+# KEYWORD: shutdown
+
+. /etc/rc.subr
+
+name="crowdsec_cti"
+rcvar="crowdsec_cti_enable"
+command="/usr/local/bin/crowdsec-cti.py"
+command_interpreter="python3"
+pidfile="/var/run/${name}.pid"
+logdir="/var/log/crowdsec"
+logfile="${logdir}/crowdsec_cti_debug.log"
+
+load_rc_config $name
+
+: ${crowdsec_cti_enable:="NO"}
+: ${crowdsec_cti_timeout:="10"} # Default timeout for stopping service (in seconds)
+: ${crowdsec_cti_debug:="NO"}   # Enable debug mode for verbose Python output
+
+start_cmd="${name}_start"
+stop_cmd="${name}_stop"
+status_cmd="${name}_status"
+restart_cmd="${name}_restart"
+
+crowdsec_cti_start() {
+    if ! checkyesno ${rcvar}; then
+        return 0
+    fi
+
+    # Check if service is already running
+    if [ -f "${pidfile}" ] && pgrep -F "${pidfile}" >/dev/null; then
+        echo "${name} is already running as PID $(cat ${pidfile})."
+        echo "$(date '+%Y-%m-%d %H:%M:%S,000') - INFO - ${name} is already running as PID $(cat ${pidfile})." >> "${logfile}"
+        return 0
+    fi
+
+    # Check if Python script exists
+    if [ ! -f "${command}" ]; then
+        err 1 "Error: ${command} does not exist."
+    fi
+
+    # Ensure log directory exists
+    if [ ! -d "${logdir}" ]; then
+        mkdir -p "${logdir}" || err 1 "Error: Cannot create ${logdir}."
+        chown ${name} "${logdir}" 2>/dev/null || :
+    fi
+
+    # Ensure log file is writable
+    if [ -f "${logfile}" ] && [ ! -w "${logfile}" ]; then
+        err 1 "Error: ${logfile} is not writable."
+    fi
+
+    echo "Starting ${name}..."
+    echo "$(date '+%Y-%m-%d %H:%M:%S,000') - INFO - Starting ${name}." >> "${logfile}"
+    if checkyesno crowdsec_cti_debug; then
+        # Debug mode: Run with verbose Python output
+        /usr/sbin/daemon -f -p ${pidfile} /usr/local/bin/python3 -v ${command} >> "${logfile}" 2>&1
+    else
+        /usr/sbin/daemon -f -p ${pidfile} /usr/local/bin/python3 ${command} >> "${logfile}" 2>&1
+    fi
+
+    # Wait briefly and check if the process is running
+    sleep 1
+    if [ -f "${pidfile}" ] && pgrep -F "${pidfile}" >/dev/null; then
+        echo "${name} started with PID $(cat ${pidfile})."
+        echo "$(date '+%Y-%m-%d %H:%M:%S,000') - INFO - ${name} started with PID $(cat ${pidfile})." >> "${logfile}"
+    else
+        err 1 "Error: Failed to start ${name}. Check ${logfile}."
+    fi
+}
+
+crowdsec_cti_stop() {
+    if [ ! -f "${pidfile}" ]; then
+        echo "${name} is not running."
+        echo "$(date '+%Y-%m-%d %H:%M:%S,000') - INFO - ${name} is not running." >> "${logfile}"
+        return 0
+    fi
+
+    echo "Stopping ${name}..."
+    echo "$(date '+%Y-%m-%d %H:%M:%S,000') - INFO - Stopping ${name}." >> "${logfile}"
+    pid=$(cat "${pidfile}" 2>/dev/null)
+    if [ -z "${pid}" ]; then
+        echo "Warning: ${pidfile} is empty or invalid."
+        echo "$(date '+%Y-%m-%d %H:%M:%S,000') - INFO - ${pidfile} is empty or invalid." >> "${logfile}"
+        rm -f "${pidfile}"
+        return 0
+    fi
+
+    # Send SIGTERM and wait for process to terminate
+    pkill -TERM -F "${pidfile}" 2>/dev/null
+    timeout=${crowdsec_cti_timeout}
+    while [ ${timeout} -gt 0 ]; do
+        if ! pgrep -F "${pidfile}" >/dev/null 2>&1; then
+            rm -f "${pidfile}"
+            echo "${name} stopped."
+            echo "$(date '+%Y-%m-%d %H:%M:%S,000') - INFO - ${name} stopped." >> "${logfile}"
+            return 0
+        fi
+        sleep 1
+        timeout=$((timeout - 1))
+    done
+
+    # If still running, force kill
+    echo "Warning: ${name} did not stop within ${crowdsec_cti_timeout} seconds. Forcing termination."
+    echo "$(date '+%Y-%m-%d %H:%M:%S,000') - INFO - Forcing termination of ${name} after ${crowdsec_cti_timeout} seconds." >> "${logfile}"
+    pkill -KILL -F "${pidfile}" 2>/dev/null
+    rm -f "${pidfile}"
+}
+
+crowdsec_cti_status() {
+    if [ -f "${pidfile}" ] && pgrep -F "${pidfile}" >/dev/null; then
+        echo "${name} is running as $(cat ${pidfile})."
+    else
+        echo "${name} is not running."
+    fi
+}
+
+crowdsec_cti_restart() {
+    echo "Restarting ${name}..."
+    echo "$(date '+%Y-%m-%d %H:%M:%S,000') - INFO - Restarting ${name}." >> "${logfile}"
+    ${name}_stop
+    sleep 1
+    ${name}_start
+}
+
+run_rc_command "$1"
